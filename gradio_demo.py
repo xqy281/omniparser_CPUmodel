@@ -12,8 +12,10 @@ from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processo
 import torch
 from PIL import Image
 
-yolo_model = get_yolo_model(model_path='weights/icon_detect/model.pt')
-caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path="weights/icon_caption_florence")
+DEVICE = torch.device('cpu')
+
+yolo_model = get_yolo_model(model_path='weights/icon_detect/model.pt').to(DEVICE)
+caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path="weights/icon_caption_florence", device=DEVICE)
 # caption_model_processor = get_caption_model_processor(model_name="blip2", model_name_or_path="weights/icon_caption_blip2")
 
 MARKDOWN = """
@@ -27,7 +29,6 @@ MARKDOWN = """
 OmniParser is a screen parsing tool to convert general GUI screen to structured elements. 
 """
 
-DEVICE = torch.device('cuda')
 
 # @spaces.GPU
 # @torch.inference_mode()
@@ -89,7 +90,8 @@ with gr.Blocks() as demo:
             use_paddleocr_component,
             imgsz_component
         ],
-        outputs=[image_output_component, text_output_component]
+        outputs=[image_output_component, text_output_component],
+        queue=False
     )
 
 # demo.launch(debug=False, show_error=True, share=True)

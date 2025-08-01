@@ -19,16 +19,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 import easyocr
 from paddleocr import PaddleOCR
-reader = easyocr.Reader(['en'])
-paddle_ocr = PaddleOCR(
-    lang='en',  # other lang also available
-    use_angle_cls=False,
-    use_gpu=False,  # using cuda will conflict with pytorch in the same process
-    show_log=False,
-    max_batch_size=1024,
-    use_dilation=True,  # improves accuracy
-    det_db_score_mode='slow',  # improves accuracy
-    rec_batch_num=1024)
 import time
 import base64
 
@@ -42,30 +32,45 @@ from torchvision.transforms import ToPILImage
 import supervision as sv
 import torchvision.transforms as T
 from util.box_annotator import BoxAnnotator 
+from transformers import AutoProcessor, AutoModelForCausalLM, Blip2Processor, Blip2ForConditionalGeneration
+import torch
 
+# --- EasyOCR 初始化 (保持全局，因为它没有状态问题) ---
+reader = easyocr.Reader(['en'])
 
-def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2-opt-2.7b", device=None):
+# --- PaddleOCR 的初始化已从全局作用域移除，以解决Gradio中第二次调用失败的问题 ---
+
+def get_caption_model_processor(model_name, model_name_or_path, device=None):
+    """
+    Loads the specified captioning model and processor, optimized for both CPU and GPU.
+    Handles loading fine-tuned models from local paths by fetching the processor from the original base model.
+    """
     if not device:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    model = None
+    processor = None
+
     if model_name == "blip2":
-        from transformers import Blip2Processor, Blip2ForConditionalGeneration
-        processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-        if device == 'cpu':
-            model = Blip2ForConditionalGeneration.from_pretrained(
-            model_name_or_path, device_map=None, torch_dtype=torch.float32
-        ) 
-        else:
-            model = Blip2ForConditionalGeneration.from_pretrained(
-            model_name_or_path, device_map=None, torch_dtype=torch.float16
-        ).to(device)
+        # BLIP-2 loading logic remains the same
+        processor = Blip2Processor.from_pretrained(model_name_or_path)
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        model = Blip2ForConditionalGeneration.from_pretrained(
+            model_name_or_path, device_map=None, torch_dtype=dtype
+        )
     elif model_name == "florence2":
-        from transformers import AutoProcessor, AutoModelForCausalLM 
+        # 1. 从你的本地路径加载微调过的模型权重
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path, torch_dtype=dtype, trust_remote_code=True
+        )
+        # 2. 从 Florence-2 的原始 HF Hub 仓库加载处理器
         processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
-        if device == 'cpu':
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True)
-        else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True).to(device)
-    return {'model': model.to(device), 'processor': processor}
+    else:
+        raise ValueError(f"Unsupported model_name: {model_name}")
+
+    model.to(device)
+    return {'model': model, 'processor': processor}
 
 
 def get_yolo_model(model_path):
@@ -79,10 +84,12 @@ def get_yolo_model(model_path):
 def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=None, batch_size=128):
     # Number of samples per batch, --> 128 roughly takes 4 GB of GPU memory for florence v2 model
     to_pil = ToPILImage()
-    if starting_idx:
+    if starting_idx != -1:
         non_ocr_boxes = filtered_boxes[starting_idx:]
     else:
+        # 如果没有ocr内容，所有box都是icon
         non_ocr_boxes = filtered_boxes
+        
     croped_pil_image = []
     for i, coord in enumerate(non_ocr_boxes):
         try:
@@ -104,17 +111,23 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
     generated_texts = []
     device = model.device
     for i in range(0, len(croped_pil_image), batch_size):
-        start = time.time()
         batch = croped_pil_image[i:i+batch_size]
-        t1 = time.time()
-        if model.device.type == 'cuda':
-            inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=False).to(device=device, dtype=torch.float16)
-        else:
-            inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
+        
+        # 关键修复：移除对整个输入字典的 dtype 强制转换，只将张量移动到正确的设备
+        inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=False).to(device=device)
+
         if 'florence' in model.config.name_or_path:
-            generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False)
+            # 关键 Bug 修复：为 model.generate 传入 pixel_values
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=20,
+                num_beams=1, 
+                do_sample=False
+            )
         else:
-            generated_ids = model.generate(**inputs, max_length=100, num_beams=5, no_repeat_ngram_size=2, early_stopping=True, num_return_sequences=1) # temperature=0.01, do_sample=True,
+            generated_ids = model.generate(**inputs, max_length=100, num_beams=5, no_repeat_ngram_size=2, early_stopping=True, num_return_sequences=1)
+        
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
         generated_text = [gen.strip() for gen in generated_text]
         generated_texts.extend(generated_text)
@@ -510,13 +523,35 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
     image_np = np.array(image_source)
     w, h = image_source.size
     if use_paddleocr:
+        # ====================================================================
+        # !!! 关键修复：将 PaddleOCR 的初始化移到函数内部 !!!
+        # 这确保了每次调用都使用一个全新的、干净的实例，避免状态污染。
+        # ====================================================================
+        paddle_ocr = PaddleOCR(
+            lang='en',
+            use_angle_cls=False,
+            use_gpu=False,
+            show_log=False,
+            max_batch_size=1024,
+            use_dilation=True,
+            det_db_score_mode='slow',
+            rec_batch_num=1024
+        )
+        
         if easyocr_args is None:
             text_threshold = 0.5
         else:
             text_threshold = easyocr_args['text_threshold']
-        result = paddle_ocr.ocr(image_np, cls=False)[0]
-        coord = [item[0] for item in result if item[1][1] > text_threshold]
-        text = [item[1][0] for item in result if item[1][1] > text_threshold]
+        
+        # 增加对空结果的健壮性处理
+        ocr_result = paddle_ocr.ocr(image_np, cls=False)
+        if ocr_result and ocr_result[0] is not None:
+            result = ocr_result[0]
+            coord = [item[0] for item in result if item[1][1] > text_threshold]
+            text = [item[1][0] for item in result if item[1][1] > text_threshold]
+        else:
+            coord, text = [], []
+
     else:  # EasyOCR
         if easyocr_args is None:
             easyocr_args = {}
