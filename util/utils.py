@@ -36,7 +36,7 @@ from transformers import AutoProcessor, AutoModelForCausalLM, Blip2Processor, Bl
 import torch
 
 # --- EasyOCR 初始化 (保持全局，因为它没有状态问题) ---
-reader = easyocr.Reader(['en'])
+reader = easyocr.Reader(['en', 'ch_sim']) # 增加中文简体支持
 
 # --- PaddleOCR 的初始化已从全局作用域移除，以解决Gradio中第二次调用失败的问题 ---
 
@@ -528,7 +528,7 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
         # 这确保了每次调用都使用一个全新的、干净的实例，避免状态污染。
         # ====================================================================
         paddle_ocr = PaddleOCR(
-            lang='en',
+            lang='ch',
             use_angle_cls=False,
             use_gpu=False,
             show_log=False,

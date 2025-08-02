@@ -1,0 +1,24 @@
+[Unit]
+Description=OmniParser API and Gradio Service
+# 这个服务会在网络准备好之后启动
+After=network.target
+
+[Service]
+# 你的用户名
+User=xiaoqianyun
+# 你的用户组
+Group=xiaoqianyun
+
+# 你的OmniParser项目的完整路径
+WorkingDirectory=/home/xiaoqianyun/OmniParser
+
+# 你的Conda环境中python解释器的完整路径，以及要执行的脚本
+ExecStart=/home/xiaoqianyun/anaconda3/envs/omni/bin/python combined_server.py
+
+# 如果服务意外失败，5秒后自动重启
+Restart=on-failure
+RestartSec=5
+
+[Install]
+# 这个服务将在多用户模式下启动（即正常开机）
+WantedBy=multi-user.target

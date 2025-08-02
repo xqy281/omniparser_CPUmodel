@@ -31,3 +31,7 @@ screeninfo
 uiautomation
 dashscope
 groq
+fastapi
+uvicorn
+python-multipart
+requests
